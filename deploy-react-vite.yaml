@@ -1,0 +1,129 @@
+# This playbook installs Node.js/npm and deploys a built Vite React app to nginx.
+# Purpose: demonstrative/learning Ansible playbook showing common modules and patterns.
+# Notes:
+#  - Designed for Debian/Ubuntu family (apt module).
+#  - Two plays: 1) install Node/npm, 2) deploy static build behind nginx.
+#  - Uses become: true to perform privileged ops (package install, nginx config).
+#  - Keep secrets out of repo (no sensitive data included here).
+---
+- name: Install Node.js and npm
+  hosts: webserver
+  become: true
+  # This play uses apt to ensure packages are present and then verifies installation.
+  tasks:
+    - name: Update apt cache
+      # apt.update_cache keeps APT metadata fresh; cache_valid_time avoids repeated updates.
+      apt:
+        update_cache: yes
+        force_apt_get: yes
+        cache_valid_time: 3600
+
+    - name: Install Node.js and npm
+      # Installs packages idempotently; if already present, Ansible will report 'ok'.
+      apt:
+        name:
+          - nodejs
+          - npm
+        state: present
+
+    - name: Verify Node.js installation
+      # Use command to capture output; register saves stdout for later use.
+      command: node -v
+      register: node_version
+      changed_when: false  # verification should not mark the play as changed
+
+    - name: Verify npm installation
+      command: npm -v
+      register: npm_version
+      changed_when: false
+
+    - name: Display Node.js and npm versions
+      # Helpful feedback in play recap and CI logs to show versions installed.
+      debug:
+        msg: "Node.js version: {{ node_version.stdout }}, npm version: {{ npm_version.stdout }}"
+
+
+- name: Deploy Vite React app
+  hosts: webserver
+  become: true
+  # This play copies a pre-built tarball to the remote host, extracts it to /var/www,
+  # configures nginx to serve the static files and restarts nginx.
+  tasks:
+    - name: Ensure nginx, tar, gzip, unzip, and xz-utils are installed
+      # Ensure required binaries are present for extracting archives and serving content.
+      apt:
+        name:
+          - nginx
+          - tar
+          - gzip
+          - unzip
+          - xz-utils
+        state: present
+        update_cache: yes
+
+    - name: Copy the build tarball to remote server
+      # copy takes a local src and uploads it. Make sure the path is correct and not ignored.
+      copy:
+        src: /home/arman/learn-devops/ansible/Eshadhin_complete/eshadhin_build.tar.gz
+        dest: /tmp/eshadhin_build.tar.gz
+        mode: '0644'
+
+    - name: Create deployment directory
+      # Create the target webroot with correct ownership for nginx (www-data).
+      file:
+        path: /var/www/eshadhin
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Extract build files
+      # unarchive with remote_src=yes expects the src already on the remote host.
+      # --strip-components=1 removes top-level directory inside the tarball.
+      unarchive:
+        src: /tmp/eshadhin_build.tar.gz
+        dest: /var/www/eshadhin
+        remote_src: yes
+        extra_opts: [--strip-components=1]
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Configure Nginx for React app
+      # Writing a simple server block. Change server_name and TLS as needed for production.
+      copy:
+        dest: /etc/nginx/sites-available/eshadhin
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              root /var/www/eshadhin;
+              index index.html;
+
+              # For single-page apps, fallback to index.html for client-side routing.
+              location / {
+                  try_files $uri /index.html;
+              }
+          }
+
+    - name: Enable Nginx config
+      # Create a symlink in sites-enabled (idempotent with force: yes).
+      file:
+        src: /etc/nginx/sites-available/eshadhin
+        dest: /etc/nginx/sites-enabled/eshadhin
+        state: link
+        force: yes
+
+    - name: Remove default nginx site
+      # Remove the default site to avoid conflicts.
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Restart Nginx
+      # Restart ensures new config is loaded; enabled: true ensures service starts on boot.
+      service:
+        name: nginx
+        state: restarted
+        enabled: true

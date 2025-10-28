@@ -1,0 +1,10 @@
+[webserver]
+ec2-13-203-74-188.ap-south-1.compute.amazonaws.com
+
+[webserver:vars]
+ansible_ssh_private_key_file=~/.ssh/ansible-pem.pem 
+ansible_user=ubuntu
+
+
+ansible_become=true
+ansible_become_method=sudo

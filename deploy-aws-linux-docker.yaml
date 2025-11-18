@@ -1,0 +1,161 @@
+---
+- name: Bootstrap Python 3.8+ (no Python required on target)
+  hosts: docker_server
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check for python3.8
+      raw: command -v python3.8 || true
+      register: py38_check
+      changed_when: false
+
+    - name: Install python3.8 on Amazon Linux / RHEL / Debian (raw)
+      raw: |
+        set -e
+        if command -v python3.8 >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [ -f /etc/os-release ] && grep -qi "amazon linux" /etc/os-release; then
+          amazon-linux-extras enable python3.8 || true
+          yum install -y python3.8 || yum install -y python3 || true
+        elif [ -f /etc/redhat-release ]; then
+          yum install -y epel-release || true
+          yum install -y python38 || yum install -y python3 || true
+        elif [ -f /etc/debian_version ]; then
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3.8 || DEBIAN_FRONTEND=noninteractive apt-get install -y python3 || true
+        fi
+      when: py38_check.stdout == ''
+
+    - name: Ensure /usr/bin/python3 points to python3.8 when present
+      raw: |
+        if command -v python3.8 >/dev/null 2>&1; then
+          ln -sf "$(command -v python3.8)" /usr/bin/python3 || true
+        fi
+      changed_when: false
+
+    - name: Set interpreter for subsequent tasks
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.8
+
+    - name: Gather facts (now Python exists)
+      setup:
+
+- name: Install and start Docker on EC2 (dnf)
+  hosts: docker_server
+  become: true
+  gather_facts: yes
+
+  tasks:
+    - name: Check for /usr/libexec/platform-python (preferred system interpreter)
+      raw: test -x /usr/libexec/platform-python && echo /usr/libexec/platform-python || true
+      register: platform_python_check
+      changed_when: false
+
+    - name: Use platform-python if available
+      set_fact:
+        ansible_python_interpreter: /usr/libexec/platform-python
+      when: platform_python_check.stdout is defined and platform_python_check.stdout != ''
+
+    - name: Debug chosen interpreter
+      debug:
+        msg: "ansible_python_interpreter={{ ansible_python_interpreter | default('not-set') }}"
+
+    - name: Ensure dnf-python backend is available (optional)
+      package:
+        name: python3-dnf
+        state: present
+      when: ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution_major_version'] is version('8', '>=')
+      ignore_errors: true
+
+    - name: Ensure python dnf bindings are installed (raw)
+      raw: |
+        set -e
+        # already installed?
+        if python3 -c "import dnf" >/dev/null 2>&1 || python3 -c "import libdnf" >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [ -f /etc/os-release ] && grep -qi "amazon linux" /etc/os-release; then
+          amazon-linux-extras enable python3.8 || true
+          yum install -y python3-dnf python3-libdnf python3 || true
+        elif [ -f /etc/redhat-release ]; then
+          yum install -y epel-release || true
+          yum install -y python3-dnf python3-libdnf python3 || true
+        elif [ -f /etc/debian_version ]; then
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3-dnf python3-libdnf python3 || true
+        fi
+      changed_when: false
+
+    - name: Install Docker using raw commands (works without remote Python bindings)
+      raw: |
+        set -e
+        if command -v docker >/dev/null 2>&1; then
+          echo "docker already installed"
+          exit 0
+        fi
+        if [ -f /etc/os-release ] && grep -qi "amazon linux" /etc/os-release; then
+          amazon-linux-extras enable docker || true
+          yum install -y docker || true
+        elif [ -f /etc/redhat-release ]; then
+          yum install -y yum-utils device-mapper-persistent-data lvm2 || true
+          yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || true
+          yum install -y docker-ce docker-ce-cli containerd.io || yum install -y docker || true
+        elif [ -f /etc/debian_version ]; then
+          apt-get update || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release || true
+          curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo $ID)/gpg | apt-key add - || true
+          DISTRO_CODENAME=$(lsb_release -cs 2>/dev/null || echo "$(. /etc/os-release; echo $VERSION_CODENAME)")
+          echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/$(. /etc/os-release; echo $ID) ${DISTRO_CODENAME} stable" > /etc/apt/sources.list.d/docker.list || true
+          apt-get update || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io || true
+        else
+          # Fallback to yum if present
+          if command -v yum >/dev/null 2>&1; then
+            yum install -y docker || true
+          fi
+        fi
+
+    - name: Start and enable docker service (raw)
+      raw: |
+        systemctl enable --now docker || (systemctl start docker || true)
+
+    - name: Add ec2-user to docker group (raw)
+      raw: |
+        if id ec2-user >/dev/null 2>&1; then
+          usermod -aG docker ec2-user || true
+        fi
+
+    - name: Verify Docker is available (raw)
+      raw: |
+        # Prefer the lightweight `docker --version` to avoid Jinja templating issues
+        docker --version || (docker version --format '{{"{{.Server.Version}}"}}' || true)
+      register: docker_version_raw
+      changed_when: false
+
+    - name: Show Docker version
+      debug:
+        msg: "Docker {{ docker_version_raw.stdout }} is installed and running"
+
+    - name: Get latest Docker Compose version
+      uri:
+        url: https://api.github.com/repos/docker/compose/releases/latest
+        return_content: yes
+      register: latest_release
+
+    - name: Install latest Docker Compose
+      get_url:
+        url: "{{ latest_release.json.assets | selectattr('name', 'equalto', 'docker-compose-linux-x86_64') | map(attribute='browser_download_url') | first }}"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'   
+        
+    - name: Verify Docker Compose version
+      command: /usr/local/bin/docker-compose --version
+      register: compose_version
+      changed_when: false
+
+    - name: Show Docker Compose version
+      debug:
+        msg: "Installed Docker Compose: {{ compose_version.stdout }}"
+

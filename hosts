@@ -1,3 +1,7 @@
+[docker_server]
+3.110.29.166 ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_user=ubuntu
+
+
 [webserver]
 ec2-13-204-87-19.ap-south-1.compute.amazonaws.com
 

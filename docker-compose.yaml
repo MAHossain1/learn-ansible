@@ -1,0 +1,42 @@
+services:
+  mongodb:
+    image: mongo
+    volumes:
+      - ts-docker-db:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=arman
+      - MONGO_INITDB_ROOT_PASSWORD=hardPassword
+    ports:
+      - "27017:27017"
+
+  mongo-express:
+    image: mongo-express
+    depends_on:
+      - mongodb
+    environment:
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=arman
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=hardPassword
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+    ports:
+      - "8081:8081"
+
+  ts-docker-backend-container:
+    image: arman04/todo-ts-backend:v1
+
+    ports:
+      - "5000:5000"
+
+    volumes:
+      - ts-docker-logs:/app/logs
+      - /home/ubuntu/docker-with-typescript-backend:/app
+      - /app/node-modules
+
+    env_file:
+      - /home/ubuntu/docker-with-typescript-backend/.env
+
+    depends_on:
+      - mongodb
+
+volumes:
+  ts-docker-db:
+  ts-docker-logs:
